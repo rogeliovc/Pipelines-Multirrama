@@ -1,48 +1,73 @@
 pipeline {
     agent any
+    
+    // Forzamos a Jenkins a registrar el parámetro desde el código
+    parameters {
+        choice(name: 'BRANCH_TO_DEPLOY', choices: ['main', 'dev'], description: 'Entorno a desplegar (Solo para pipeline manual)')
+    }
+    
     tools {
-        // Asegúrate de que tu herramienta NodeJS esté configurada con este nombre en Global Tool Configuration
         nodejs 'node' 
     }
-    environment {
-        // Si BRANCH_NAME viene nula (pipeline manual), toma el valor del parámetro BRANCH_TO_DEPLOY. Si no, usa BRANCH_NAME.
-        TARGET_BRANCH = "${env.BRANCH_NAME ?: params.BRANCH_TO_DEPLOY}"
-        
-        // Asignación condicional de puertos: 3000 para main, 3001 para cualquier otra rama o entorno
-        HOST_PORT = "${(env.BRANCH_NAME == 'main' || params.BRANCH_TO_DEPLOY == 'main') ? '3000' : '3001'}"
-        
-        // Nombre seguro para la rama/entorno evitando nulos
-        SAFE_BRANCH = "${(env.BRANCH_NAME && env.BRANCH_NAME != 'null') ? env.BRANCH_NAME : params.BRANCH_TO_DEPLOY}"
-    }
+    
     stages {
+        // Etapa de preparación para calcular variables de forma segura
+        stage('Prepare Variables') {
+            steps {
+                script {
+                    // Si env.BRANCH_NAME existe y no es nulo (Multibranch), lo usa. Si no, usa el parámetro manual.
+                    if (env.BRANCH_NAME && env.BRANCH_NAME != 'null') {
+                        env.ACTUAL_BRANCH = env.BRANCH_NAME
+                    } else {
+                        env.ACTUAL_BRANCH = params.BRANCH_TO_DEPLOY
+                    }
+                    
+                    // Asignamos el puerto dependiendo de la rama final
+                    if (env.ACTUAL_BRANCH == 'main') {
+                        env.HOST_PORT = '3000'
+                    } else {
+                        env.HOST_PORT = '3001'
+                    }
+                    
+                    echo "Rama detectada para despliegue: ${env.ACTUAL_BRANCH}"
+                    echo "Puerto asignado: ${env.HOST_PORT}"
+                }
+            }
+        }
+        
         stage('Checkout SCM') {
             steps {
                 checkout scm
             }
         }
+        
         stage('Build') {
             steps {
                 sh 'npm install'
             }
         }
+        
         stage('Test') {
             steps {
                 sh 'npm test || echo "Saltando pruebas"'
             }
         }
+        
         stage('Docker build') {
             steps {
-                sh "docker build -t node${SAFE_BRANCH}:v1.0 ."
+                sh "docker build -t node${env.ACTUAL_BRANCH}:v1.0 ."
             }
         }
+        
         stage('Deploy') {
             steps {
-                // Detiene y elimina de forma segura cualquier contenedor previo del entorno para liberar puertos
                 sh """
-                docker stop app_${SAFE_BRANCH} || true
-                docker rm app_${SAFE_BRANCH} || true
+                # Detiene y borra el contenedor correcto de esta rama
+                docker stop app_${env.ACTUAL_BRANCH} || true
+                docker rm app_${env.ACTUAL_BRANCH} || true
                 
-                docker run -d -p ${HOST_PORT}:3000 --name app_${SAFE_BRANCH} node${SAFE_BRANCH}:v1.0
+                # Levanta el nuevo contenedor
+                docker run -d -p ${env.HOST_PORT}:3000 --name app_${env.ACTUAL_BRANCH} node${env.ACTUAL_BRANCH}:v1.0
                 """
             }
         }
